@@ -3,31 +3,56 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createClient } from "@supabase/supabase-js";
-import { GoogleGenAI, Modality } from "@google/genai";
+import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // --- Initialization ---
 
-// Gemini AI
-let genAI: GoogleGenAI;
-function getGenAI() {
-  if (!genAI) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
-    genAI = new GoogleGenAI({ apiKey });
-  }
-  return genAI;
-}
+// Voice mapping for Edge TTS
+const VOICE_MAP: Record<string, string> = {
+  // --- Hindi ---
+  "Madhur": "hi-IN-MadhurNeural",
+  "Hemant": "hi-IN-HemantNeural",
+  "Swara": "hi-IN-SwaraNeural",
+  "Ananya": "hi-IN-AnanyaNeural",
+  "Kavya": "hi-IN-KavyaNeural",
+  // --- English India ---
+  "Prabhat": "en-IN-PrabhatNeural",
+  "Neerja": "en-IN-NeerjaNeural",
+  "Ravi": "en-IN-RaviNeural",
+  // --- Regional Indian Languages ---
+  "Aarohi": "mr-IN-AarohiNeural",    // Marathi
+  "Manohar": "mr-IN-ManoharNeural",  // Marathi
+  "Bashkar": "bn-IN-BashkarNeural",  // Bengali
+  "Tanishaa": "bn-IN-TanishaaNeural", // Bengali
+  "Pallavi": "ta-IN-PallaviNeural",  // Tamil
+  "Valluvar": "ta-IN-ValluvarNeural", // Tamil
+  "Mohan": "te-IN-MohanNeural",      // Telugu
+  "Shruti": "te-IN-ShrutiNeural",    // Telugu
+  "Dhwani": "gu-IN-DhwaniNeural",    // Gujarati
+  "Sapna": "kn-IN-SapnaNeural",      // Kannada
+  "Sobhana": "ml-IN-SobhanaNeural",  // Malayalam
+  // --- Kid-Friendly / Popular International Fallbacks ---
+  "Steffan": "en-US-SteffanNeural",  // Young Boy (US)
+  "Michelle": "en-US-MichelleNeural", // Young Girl (US)
+  "Emma": "en-GB-SoniaNeural",      // Smooth British
+  "Liam": "en-CA-LiamNeural"        // Clean Canadian
+};
 
 // Supabase (Service Role for Admin Tasks)
 let supabaseAdmin: any;
 function getSupabase() {
   if (!supabaseAdmin) {
     const url = process.env.VITE_SUPABASE_URL;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    // Prefer service role key for backend actions, fallback to anon key if that's all there is
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 
+                       process.env.SUPABASE_KEY || 
+                       process.env.VITE_SUPABASE_ANON_KEY;
+
     if (!url || !serviceKey) {
+      console.error("Supabase config missing:", { url: !!url, key: !!serviceKey });
       throw new Error("Supabase URL or Service Role Key missing in environment");
     }
     supabaseAdmin = createClient(url, serviceKey, {
@@ -56,9 +81,23 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // Background Purge Task (Every 5 minutes)
+  setInterval(async () => {
+    try {
+      const supabase = getSupabase();
+      const { count } = await supabase
+        .from("audio_logs")
+        .delete({ count: 'exact' })
+        .lt("expires_at", new Date().toISOString());
+      if (count && count > 0) console.log(`Auto-Purge: Cleaned ${count} expired audio files.`);
+    } catch (e) {
+      console.error("Purge Task Error:", e);
+    }
+  }, 5 * 60 * 1000);
+
   // TTS Generation with Credit Check & Deduction
   app.post("/api/generate-audio", async (req, res) => {
-    const { userId, text, voice, emotion, pitch, speed, reverb } = req.body;
+    const { userId, text, voice, emotion, pitch, speed, reverb, kidsMode } = req.body;
     
     if (!userId || !text) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -77,10 +116,10 @@ async function startServer() {
     try {
       const supabase = getSupabase();
       
-      // 2. Credit Check
+      // 2. Credit Check & Daily Reset Logic
       const { data: profile, error: profileError } = await supabase
         .from("profiles")
-        .select("credits")
+        .select("*")
         .eq("id", userId)
         .single();
 
@@ -88,56 +127,98 @@ async function startServer() {
         return res.status(404).json({ error: "User profile not found" });
       }
 
-      if (profile.credits < textLength) {
-        return res.status(403).json({ error: "Insufficient credits", remaining: profile.credits });
+      // Check if we need a daily reset (fallback to created_at if updated_at is missing)
+      const lastUpdateStr = profile.updated_at || profile.created_at;
+      const lastUpdate = lastUpdateStr ? new Date(lastUpdateStr).setHours(0,0,0,0) : 0;
+      const today = new Date().setHours(0,0,0,0);
+      
+      let currentCredits = profile.credits;
+      if (lastUpdateStr && today > lastUpdate) {
+        console.log(`Resetting credits for user: ${userId}`);
+        currentCredits = 3000;
       }
 
-      // 3. Generate TTS via Gemini 2.0 Flash
-      console.log(`Generating TTS for ${userId}, length: ${textLength}`);
-      const ai = getGenAI();
-      
-      // Enhanced prompt with reverb/echo instructions if requested
-      const prompt = `You are an expert voice actor specializing in North Indian regional accents (Hindi, Bhojpuri, Maithili).
-Generate high-quality audio for this text.
-Voice Personality: ${voice || 'Charon'}
-Emotion: [${emotion || 'neutral'}]
-Pitch: ${pitch > 1.0 ? 'High' : pitch < 1.0 ? 'Low' : 'Normal'}
-Speed: ${speed > 1.0 ? 'Fast' : speed < 1.0 ? 'Slow' : 'Normal'}
-Environment: ${reverb > 0.5 ? 'Large Hall with Reverb/Echo' : 'Professional Studio'}
+      if (currentCredits < textLength) {
+        return res.status(403).json({ error: "Insufficient credits", remaining: currentCredits });
+      }
 
-Text to speak:
-${text}`;
-
-      // Using the latest flash model as requested for speed and quality
-      const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
+      // 3. Generate TTS via Free Edge TTS
+      console.log(`Generating TTS for ${userId}, length: ${textLength} (KidsMode: ${!!kidsMode})`);
       
-      const ttsResult = await (model as any).generateContent({
-        contents: [{ parts: [{ text: prompt }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voice || 'Charon' },
-            },
-          },
-        },
+      const tts = new MsEdgeTTS({ enableLogger: true });
+      const edgeVoice = VOICE_MAP[voice] || "hi-IN-MadhurNeural";
+      
+      // Set metadata (pitch/speed/reverb)
+      // Kids Mode effectively shifts the baseline
+      let finalPitch = pitch || 1.0;
+      let finalSpeed = speed || 1.0;
+      
+      if (kidsMode) {
+        // Boost pitch for high-pitched child voice
+        finalPitch += 0.45; 
+        finalSpeed += 0.05; // Slightly faster for childish cadence
+      }
+
+      const edgePitch = `${Math.round((finalPitch - 1) * 100)}%`;
+      const edgeSpeed = `${Math.round((finalSpeed - 1) * 100)}%`;
+
+      // Initializing metadata for each call ensures clean state
+      await tts.setMetadata(edgeVoice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+      
+      // Convert stream to buffer
+      const audioData = await new Promise<string>((resolve, reject) => {
+        const { audioStream } = tts.toStream(text, {
+          pitch: edgePitch,
+          rate: edgeSpeed
+        });
+        const chunks: Buffer[] = [];
+        let hasData = false;
+
+        audioStream.on("data", (chunk) => {
+          hasData = true;
+          chunks.push(chunk);
+        });
+
+        audioStream.on("end", () => {
+          if (!hasData) {
+            tts.close();
+            return reject(new Error("Edge TTS stream ended without any data."));
+          }
+          const buffer = Buffer.concat(chunks);
+          console.log(`Edge TTS Success: ${buffer.length} bytes generated.`);
+          tts.close();
+          resolve(buffer.toString("base64"));
+        });
+
+        audioStream.on("error", (err) => {
+          console.error("Edge TTS Stream Error:", err);
+          tts.close();
+          reject(err);
+        });
+
+        // Safety timeout
+        setTimeout(() => {
+          if (!hasData) {
+            tts.close();
+            reject(new Error("Edge TTS generation timed out after 15s."));
+          }
+        }, 15000);
       });
-
-      const audioData = ttsResult.response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (!audioData) {
-        throw new Error("Gemini returned no audio data. The model might be busy or the request was filtered.");
-      }
+      
+      const mimeType = "audio/mpeg";
 
       // 4. Update Credits & Log Task
-      // We do this in a transaction-like way (sequential updates)
       const { error: updateError } = await supabase
         .from("profiles")
-        .update({ credits: profile.credits - textLength })
+        .update({ 
+          credits: currentCredits - textLength
+          // Omitted updated_at to prevent "column not found" error if user hasn't run SQL yet
+        })
         .eq("id", userId);
 
       if (updateError) throw updateError;
 
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes purge
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); 
       const { data: logEntry, error: logError } = await supabase
         .from("audio_logs")
         .insert({
@@ -155,8 +236,9 @@ ${text}`;
       res.json({ 
         success: true, 
         audioData,
+        mimeType,
         logId: logEntry.id,
-        newCredits: profile.credits - textLength,
+        newCredits: currentCredits - textLength,
         expiresAt
       });
 
