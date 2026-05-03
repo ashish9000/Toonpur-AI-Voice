@@ -1,0 +1,6 @@
+{
+  "name": "Toonpur AI Voice",
+  "description": "Creator-first TTS engine focused on natural Indian regional accents with smart credit logic and auto-purge storage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["AI Voice Generation", "Regional Accents", "Credit Management"]
+}

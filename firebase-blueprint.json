@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Stores user credits and subscription status.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "credits": { "type": "integer", "description": "Remaining character credits." },
+        "tier": { "type": "string", "enum": ["free", "starter", "pro"] },
+        "lastCreditRefill": { "type": "string", "format": "date-time" },
+        "dailyUsage": { "type": "integer", "description": "Usage in the last 24h for FUP." },
+        "lastUsageReset": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "credits", "tier", "lastCreditRefill"]
+    },
+    "AudioTask": {
+      "title": "Audio Generation Task",
+      "description": "Stores metadata and data for a generated audio file.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "text": { "type": "string" },
+        "voice": { "type": "string" },
+        "emotion": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "audioData": { "type": "string", "description": "Base64 encoded audio string (if within docs limit)." },
+        "fileName": { "type": "string" }
+      },
+      "required": ["userId", "text", "createdAt", "expiresAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User account data."
+    },
+    "/audio_tasks/{taskId}": {
+      "schema": "AudioTask",
+      "description": "Temporary storage for generated audio metadata and some data."
+    }
+  }
+}
